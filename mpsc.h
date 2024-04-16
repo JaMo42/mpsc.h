@@ -1,4 +1,4 @@
-/* https://github.com/JaMo42/mpsc-c */
+/* https://github.com/JaMo42/mpsc.h */
 #ifndef MPSC_H
 #define MPSC_H
 #include <stdlib.h>

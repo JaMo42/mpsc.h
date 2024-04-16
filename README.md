@@ -57,7 +57,7 @@ Required standard:
 
 ## Design
 
-The way the macro-based api was designed wasn't done with care but is just the first thing I came up with that works, there are some oddities about it such as macros expecting variable identifiers instead of values but I won't spend time reworking it as I don't think it's neccessary because it's good enough for me and the base api without macros can be used without issues as well.
+The way the macro-based API was designed wasn't done with care but is just the first thing I came up with that works, there are some oddities about it such as macros expecting variable identifiers instead of values but I won't spend time reworking it as I don't think it's necessary because it's good enough for me and the base API without macros can be used without issues as well.
 
 The implementation is also kept simple and straight forward and is not the most optimized, but easy to modify and adjust.
 
@@ -65,7 +65,7 @@ The implementation is also kept simple and straight forward and is not the most 
 
 Since the queues ownership is shared between all senders/receivers, a closed queue is still kept alive and can be re-opened by creating new senders/receivers to it despite all senders/receivers having been dropped previously, unlike for example in rust where once all senders/receivers are dropped the queue is closed for good.
 The queue is only deleted once all senders and receivers are dropped.
-I don't know if this is every useful and it's not a consicous design decision but just how the implementation works.
+I don't know if this is ever useful and it's not a conscious design decision but just how the implementation works.
 
 ## License
 
