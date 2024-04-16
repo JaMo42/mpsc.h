@@ -1,0 +1,8 @@
+*
+!.gitignore
+!mpsc.h
+!test.c
+!example.c
+!example_no_macros.c
+!Makefile
+!README.md
