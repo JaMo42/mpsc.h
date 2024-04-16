@@ -34,6 +34,7 @@ struct mpsc_queue_node {
 struct mpsc_queue {
     struct mpsc_queue_node *head;
     struct mpsc_queue_node *tail;
+    struct mpsc_queue_node *freelist;
     mtx_t mutex;
     cnd_t cond;
     atomic_size_t senders;
@@ -241,7 +242,9 @@ const char* mpsc_error_message(enum mpsc_error err) {
 
 struct mpsc_queue* mpsc_queue_new(void) {
     struct mpsc_queue *q = (struct mpsc_queue*)malloc(sizeof(*q));
-    q->head = q->tail = NULL;
+    q->head = NULL;
+    q->tail = NULL;
+    q->freelist = NULL;
     mtx_init(&q->mutex, mtx_plain);
     cnd_init(&q->cond);
     atomic_init(&q->senders, 0);
@@ -249,30 +252,56 @@ struct mpsc_queue* mpsc_queue_new(void) {
     return q;
 }
 
+static void mpsc_free_nodes(struct mpsc_queue_node *node) {
+    struct mpsc_queue_node *next;
+    while (node) {
+        next = node->next;
+        free(node);
+        node = next;
+    }
+}
+
 void mpsc_queue_drop(struct mpsc_queue *queue) {
     mtx_destroy(&queue->mutex);
     cnd_destroy(&queue->cond);
     if (queue->head) {
-        struct mpsc_queue_node *node, *next;
-        node = queue->head;
-        while (node) {
-            next = node->next;
-            free(node);
-            node = next;
-        }
+        mpsc_free_nodes(queue->head);
         queue->head = NULL;
         queue->tail = NULL;
+    }
+    if (queue->freelist) {
+        mpsc_free_nodes(queue->freelist);
+        queue->freelist = NULL;
     }
     free(queue);
 }
 
+static struct mpsc_queue_node* mpsc_queue_new_node(struct mpsc_queue *queue, size_t size) {
+    struct mpsc_queue_node *node;
+    if (queue->freelist) {
+        if (queue->freelist->size != size) {
+            fprintf(
+                stderr,
+                "mpsc: warning: send size does not match node size "
+                "(have %zu bytes, sending %zu).\n",
+                queue->freelist->size,
+                size
+            );
+        }
+        node = queue->freelist;
+        queue->freelist = node->next;
+    } else {
+        node = (struct mpsc_queue_node*)malloc(sizeof(*node) + size);
+    }
+    return node;
+}
+
 void mpsc_queue_push(struct mpsc_queue *queue, const void *data, size_t size) {
-    struct mpsc_queue_node *node
-        = (struct mpsc_queue_node*)malloc(sizeof(*node) + size);
+    mtx_lock(&queue->mutex);
+    struct mpsc_queue_node *node = mpsc_queue_new_node(queue, size);
     memcpy(node->data, data, size);
     node->size = size;
     node->next = NULL;
-    mtx_lock(&queue->mutex);
     if (queue->tail) {
         queue->tail->next = node;
     } else {
@@ -305,18 +334,19 @@ enum mpsc_error mpsc_queue_pop(struct mpsc_queue *queue, void *data, size_t size
     if (!queue->head) {
         queue->tail = NULL;
     }
-    mtx_unlock(&queue->mutex);
     if (node->size != size) {
         fprintf(
             stderr,
-            "mpsc: warning: size does not match data size "
+            "mpsc: warning: recv size does not match data size "
             "(contains %zu bytes, requested %zu).\n",
             node->size,
             size
         );
     }
     memcpy(data, node->data, size);
-    free(node);
+    node->next = queue->freelist;
+    queue->freelist = node;
+    mtx_unlock(&queue->mutex);
     cnd_signal(&queue->cond);
     return mpsc_OK;
 }
