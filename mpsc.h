@@ -27,7 +27,6 @@ enum mpsc_error {
 
 struct mpsc_queue_node {
     struct mpsc_queue_node *next;
-    size_t size;
     char data[];
 };
 
@@ -35,6 +34,7 @@ struct mpsc_queue {
     struct mpsc_queue_node *head;
     struct mpsc_queue_node *tail;
     struct mpsc_queue_node *freelist;
+    size_t datasize;
     mtx_t mutex;
     cnd_t cond;
     atomic_size_t senders;
@@ -84,7 +84,13 @@ struct mpsc_receiver {
 /// ```
 #define MPSC_CHANNEL(_sident, _rident) \
     ( \
-        _rident = (typeof(_rident))mpsc_receiver_new(mpsc_shared_queue_new()), \
+        ((void)(MPSC__STATIC_ASSERT_EXPR( \
+            __builtin_types_compatible_p(typeof(*_sident), typeof(*_rident)), \
+            "sender and receiver have incompatible types" \
+        ))), \
+        _rident = (typeof(_rident))mpsc_receiver_new( \
+            mpsc_shared_queue_new(sizeof(*_rident)) \
+        ), \
         _sident = (typeof(_sident))mpsc_sender_new( \
             mpsc_shared_queue_clone(((struct mpsc_receiver*)_rident)->queue) \
         ) \
@@ -164,7 +170,7 @@ struct mpsc_receiver {
 #define MPSC_SEND(_sident, _data) \
     (MPSC__TYPECHECK(_sident, &_data), \
     /* NOLINTNEXTLINE */\
-    mpsc_sender_send((struct mpsc_sender*)_sident, (void*)&_data, sizeof(_data)))
+    mpsc_sender_send((struct mpsc_sender*)_sident, (void*)&_data))
 
 /// Receives data over the channel.  The data parameter is the identifier of a
 /// value, not a pointer to it.  Returns mpsc_CLOSED if the other half of the
@@ -183,52 +189,52 @@ struct mpsc_receiver {
 #define MPSC_RECV(_rident, _data) \
     (MPSC__TYPECHECK(_rident, &_data), \
     /* NOLINTNEXTLINE */\
-    mpsc_receiver_recv((struct mpsc_receiver*)_rident, (void*)&_data, sizeof(_data)))
+    mpsc_receiver_recv((struct mpsc_receiver*)_rident, (void*)&_data))
 
 /// Tries to receive data over the channel if there is any, returns mpsc_EMPTY
 /// otherwise.  See MPSC_RECV for more information.
 #define MPSC_TRY_RECV(_rident, _data) \
     (MPSC__TYPECHECK(_rident, &_data), \
     /* NOLINTNEXTLINE */\
-    mpsc_receiver_try_recv((struct mpsc_receiver*)_rident, (void*)&_data, sizeof(_data)))
+    mpsc_receiver_try_recv((struct mpsc_receiver*)_rident, (void*)&_data))
 
 /// Receives data over the channel with a timeout, returns mpsc_TIMEOUT if the
 /// timeout is reached.  See MPSC_RECV for more information.
 #define MPSC_RECV_TIMEOUT(_rident, _data, _timeout) \
     (MPSC__TYPECHECK(_rident, &_data), \
     /* NOLINTNEXTLINE */\
-    mpsc_receiver_recv_timeout((struct mpsc_receiver*)_rident, (void*)&_data, sizeof(_data), _timeout))
+    mpsc_receiver_recv_timeout((struct mpsc_receiver*)_rident, (void*)&_data, _timeout))
 
 /// Returns a string representation of the error.
 const char* mpsc_error_message(enum mpsc_error err);
 
-struct mpsc_queue* mpsc_queue_new(void);
+struct mpsc_queue* mpsc_queue_new(size_t datasize);
 void mpsc_queue_drop(struct mpsc_queue *queue);
-void mpsc_queue_push(struct mpsc_queue *queue, const void *data, size_t size);
-enum mpsc_error mpsc_queue_pop(struct mpsc_queue *queue, void *data, size_t size);
+void mpsc_queue_push(struct mpsc_queue *queue, const void *data);
+enum mpsc_error mpsc_queue_pop(struct mpsc_queue *queue, void *data);
 
-struct mpsc_shared_queue mpsc_shared_queue_new(void);
+struct mpsc_shared_queue mpsc_shared_queue_new(size_t datasize);
 struct mpsc_queue* mpsc_shared_queue_get(struct mpsc_shared_queue shared_queue);
 struct mpsc_shared_queue mpsc_shared_queue_clone(struct mpsc_shared_queue shared_queue);
 void mpsc_shared_queue_drop(struct mpsc_shared_queue shared_queue);
 
-void mpsc_channel(struct mpsc_sender **tx, struct mpsc_receiver **rx);
+void mpsc_channel(struct mpsc_sender **tx, struct mpsc_receiver **rx, size_t datasize);
 
 struct mpsc_receiver* mpsc_receiver_new(struct mpsc_shared_queue queue);
 void mpsc_receiver_drop(struct mpsc_receiver *receiver);
-enum mpsc_error mpsc_receiver_recv(struct mpsc_receiver *receiver, void *data, size_t size);
-enum mpsc_error mpsc_receiver_try_recv(struct mpsc_receiver *receiver, void *data, size_t size);
+enum mpsc_error mpsc_receiver_recv(struct mpsc_receiver *receiver, void *data);
+enum mpsc_error mpsc_receiver_try_recv(struct mpsc_receiver *receiver, void *data);
 enum mpsc_error mpsc_receiver_recv_timeout(
-    struct mpsc_receiver *receiver, void *data, size_t size, const struct timespec *timeout);
+    struct mpsc_receiver *receiver, void *data, const struct timespec *timeout);
 
 struct mpsc_sender* mpsc_sender_new(struct mpsc_shared_queue queue);
 struct mpsc_sender* mpsc_sender_clone(struct mpsc_sender *sender);
 void mpsc_sender_drop(struct mpsc_sender *sender);
-enum mpsc_error mpsc_sender_send(struct mpsc_sender *sender, const void *data, size_t size);
+enum mpsc_error mpsc_sender_send(struct mpsc_sender *sender, const void *data);
 #endif
 
 
-
+#define MPSC_IMPLEMENTATION
 #ifdef MPSC_IMPLEMENTATION
 const char* mpsc_error_message(enum mpsc_error err) {
     switch (err) {
@@ -240,11 +246,12 @@ const char* mpsc_error_message(enum mpsc_error err) {
     __builtin_unreachable();
 }
 
-struct mpsc_queue* mpsc_queue_new(void) {
+struct mpsc_queue* mpsc_queue_new(size_t datasize) {
     struct mpsc_queue *q = (struct mpsc_queue*)malloc(sizeof(*q));
     q->head = NULL;
     q->tail = NULL;
     q->freelist = NULL;
+    q->datasize = datasize;
     mtx_init(&q->mutex, mtx_plain);
     cnd_init(&q->cond);
     atomic_init(&q->senders, 0);
@@ -276,31 +283,21 @@ void mpsc_queue_drop(struct mpsc_queue *queue) {
     free(queue);
 }
 
-static struct mpsc_queue_node* mpsc_queue_new_node(struct mpsc_queue *queue, size_t size) {
+static struct mpsc_queue_node* mpsc_queue_new_node(struct mpsc_queue *queue) {
     struct mpsc_queue_node *node;
     if (queue->freelist) {
-        if (queue->freelist->size != size) {
-            fprintf(
-                stderr,
-                "mpsc: warning: send size does not match node size "
-                "(have %zu bytes, sending %zu).\n",
-                queue->freelist->size,
-                size
-            );
-        }
         node = queue->freelist;
         queue->freelist = node->next;
     } else {
-        node = (struct mpsc_queue_node*)malloc(sizeof(*node) + size);
+        node = (struct mpsc_queue_node*)malloc(sizeof(*node) + queue->datasize);
     }
     return node;
 }
 
-void mpsc_queue_push(struct mpsc_queue *queue, const void *data, size_t size) {
+void mpsc_queue_push(struct mpsc_queue *queue, const void *data) {
     mtx_lock(&queue->mutex);
-    struct mpsc_queue_node *node = mpsc_queue_new_node(queue, size);
-    memcpy(node->data, data, size);
-    node->size = size;
+    struct mpsc_queue_node *node = mpsc_queue_new_node(queue);
+    memcpy(node->data, data, queue->datasize);
     node->next = NULL;
     if (queue->tail) {
         queue->tail->next = node;
@@ -320,7 +317,7 @@ static int mpsc_queue_closed_and_empty(struct mpsc_queue *queue) {
     return mpsc_queue_closed(queue) && !queue->head;
 }
 
-enum mpsc_error mpsc_queue_pop(struct mpsc_queue *queue, void *data, size_t size) {
+enum mpsc_error mpsc_queue_pop(struct mpsc_queue *queue, void *data) {
     mtx_lock(&queue->mutex);
     while (!queue->head && !mpsc_queue_closed(queue)) {
         cnd_wait(&queue->cond, &queue->mutex);
@@ -334,16 +331,7 @@ enum mpsc_error mpsc_queue_pop(struct mpsc_queue *queue, void *data, size_t size
     if (!queue->head) {
         queue->tail = NULL;
     }
-    if (node->size != size) {
-        fprintf(
-            stderr,
-            "mpsc: warning: recv size does not match data size "
-            "(contains %zu bytes, requested %zu).\n",
-            node->size,
-            size
-        );
-    }
-    memcpy(data, node->data, size);
+    memcpy(data, node->data, queue->datasize);
     node->next = queue->freelist;
     queue->freelist = node;
     mtx_unlock(&queue->mutex);
@@ -351,11 +339,11 @@ enum mpsc_error mpsc_queue_pop(struct mpsc_queue *queue, void *data, size_t size
     return mpsc_OK;
 }
 
-struct mpsc_shared_queue mpsc_shared_queue_new(void) {
+struct mpsc_shared_queue mpsc_shared_queue_new(size_t datasize) {
     struct mpsc_shared_queue shared_queue;
     shared_queue.inner
         = (struct mpsc_shared_queue_inner*)malloc(sizeof(*shared_queue.inner));
-    shared_queue.inner->queue = mpsc_queue_new();
+    shared_queue.inner->queue = mpsc_queue_new(datasize);
     atomic_init(&shared_queue.inner->refcount, 1);
     return shared_queue;
 }
@@ -377,8 +365,8 @@ void mpsc_shared_queue_drop(struct mpsc_shared_queue shared_queue) {
     }
 }
 
-void mpsc_channel(struct mpsc_sender **tx, struct mpsc_receiver **rx) {
-    struct mpsc_shared_queue queue = mpsc_shared_queue_new();
+void mpsc_channel(struct mpsc_sender **tx, struct mpsc_receiver **rx, size_t datasize) {
+    struct mpsc_shared_queue queue = mpsc_shared_queue_new(datasize);
     *rx = mpsc_receiver_new(mpsc_shared_queue_clone(queue));
     *tx = mpsc_sender_new(queue);
 }
@@ -402,14 +390,14 @@ void mpsc_receiver_drop(struct mpsc_receiver *receiver) {
     free(receiver);
 }
 
-enum mpsc_error mpsc_receiver_recv(struct mpsc_receiver *receiver, void *data, size_t size) {
+enum mpsc_error mpsc_receiver_recv(struct mpsc_receiver *receiver, void *data) {
     struct mpsc_queue *q = mpsc_shared_queue_get(receiver->queue);
     if (mpsc_queue_closed_and_empty(q)) { return mpsc_CLOSED; }
-    return mpsc_queue_pop(q, data, size);
+    return mpsc_queue_pop(q, data);
 }
 
 enum mpsc_error mpsc_receiver_try_recv(
-    struct mpsc_receiver *receiver, void *data, size_t size
+    struct mpsc_receiver *receiver, void *data
 ) {
     struct mpsc_queue *q = mpsc_shared_queue_get(receiver->queue);
     if (mpsc_queue_closed_and_empty(q)) { return mpsc_CLOSED; }
@@ -419,11 +407,11 @@ enum mpsc_error mpsc_receiver_try_recv(
         return mpsc_EMPTY;
     }
     mtx_unlock(&q->mutex);
-    return mpsc_queue_pop(q, data, size);
+    return mpsc_queue_pop(q, data);
 }
 
 enum mpsc_error mpsc_receiver_recv_timeout(
-    struct mpsc_receiver *receiver, void *data, size_t size, const struct timespec *timeout
+    struct mpsc_receiver *receiver, void *data, const struct timespec *timeout
 ) {
     struct mpsc_queue *q = mpsc_shared_queue_get(receiver->queue);
     if (mpsc_queue_closed_and_empty(q)) { return mpsc_CLOSED; }
@@ -435,7 +423,7 @@ enum mpsc_error mpsc_receiver_recv_timeout(
         }
     }
     mtx_unlock(&q->mutex);
-    return mpsc_queue_pop(q, data, size);
+    return mpsc_queue_pop(q, data);
 }
 
 struct mpsc_sender* mpsc_sender_new(struct mpsc_shared_queue queue) {
@@ -459,10 +447,10 @@ void mpsc_sender_drop(struct mpsc_sender *sender) {
     free(sender);
 }
 
-enum mpsc_error mpsc_sender_send(struct mpsc_sender *sender, const void *data, size_t size) {
+enum mpsc_error mpsc_sender_send(struct mpsc_sender *sender, const void *data) {
     struct mpsc_queue *q = mpsc_shared_queue_get(sender->queue);
     if (mpsc_queue_closed(q)) { return mpsc_CLOSED; }
-    mpsc_queue_push(q, data, size);
+    mpsc_queue_push(q, data);
     return mpsc_OK;
 }
 #endif
