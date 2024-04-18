@@ -264,9 +264,10 @@ static void mpsc_free_nodes(struct mpsc_queue_node *node) {
 }
 
 static void mpsc_queue_destruct(struct mpsc_queue *queue) {
-    if (queue->freelist) {
-        mpsc_free_nodes(queue->freelist);
-        queue->freelist = NULL;
+    if (queue->head) {
+        mpsc_free_nodes(queue->head);
+        queue->head = NULL;
+        queue->tail = NULL;
     }
     if (queue->freelist) {
         mpsc_free_nodes(queue->freelist);
