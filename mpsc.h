@@ -42,7 +42,7 @@ struct mpsc_queue {
 };
 
 struct mpsc_shared_queue_inner {
-    struct mpsc_queue *queue;
+    struct mpsc_queue queue;
     atomic_size_t refcount;
 };
 
@@ -67,10 +67,10 @@ struct mpsc_receiver {
         "channel/target type mismatch" \
     ))
 
-/// `T*`, used to show intent.
+/// `T*`.
 #define SENDER(T) T*
 
-/// `T*`, used to show intent.
+/// `T*`.
 #define RECEIVER(T) T*
 
 /// Creates a new channel, first argument is the sender, second is the receiver.
@@ -234,7 +234,7 @@ enum mpsc_error mpsc_sender_send(struct mpsc_sender *sender, const void *data);
 #endif
 
 
-#define MPSC_IMPLEMENTATION
+
 #ifdef MPSC_IMPLEMENTATION
 const char* mpsc_error_message(enum mpsc_error err) {
     switch (err) {
@@ -246,16 +246,20 @@ const char* mpsc_error_message(enum mpsc_error err) {
     __builtin_unreachable();
 }
 
+static void mpsc_queue_construct(struct mpsc_queue *queue, size_t datasize) {
+    queue->head = NULL;
+    queue->tail = NULL;
+    queue->freelist = NULL;
+    queue->datasize = datasize;
+    mtx_init(&queue->mutex, mtx_plain);
+    cnd_init(&queue->cond);
+    atomic_init(&queue->senders, 0);
+    atomic_init(&queue->receivers, 0);
+}
+
 struct mpsc_queue* mpsc_queue_new(size_t datasize) {
     struct mpsc_queue *q = (struct mpsc_queue*)malloc(sizeof(*q));
-    q->head = NULL;
-    q->tail = NULL;
-    q->freelist = NULL;
-    q->datasize = datasize;
-    mtx_init(&q->mutex, mtx_plain);
-    cnd_init(&q->cond);
-    atomic_init(&q->senders, 0);
-    atomic_init(&q->receivers, 0);
+    mpsc_queue_construct(q, datasize);
     return q;
 }
 
@@ -268,18 +272,21 @@ static void mpsc_free_nodes(struct mpsc_queue_node *node) {
     }
 }
 
-void mpsc_queue_drop(struct mpsc_queue *queue) {
-    mtx_destroy(&queue->mutex);
-    cnd_destroy(&queue->cond);
-    if (queue->head) {
-        mpsc_free_nodes(queue->head);
-        queue->head = NULL;
-        queue->tail = NULL;
+static void mpsc_queue_destruct(struct mpsc_queue *queue) {
+    if (queue->freelist) {
+        mpsc_free_nodes(queue->freelist);
+        queue->freelist = NULL;
     }
     if (queue->freelist) {
         mpsc_free_nodes(queue->freelist);
         queue->freelist = NULL;
     }
+    mtx_destroy(&queue->mutex);
+    cnd_destroy(&queue->cond);
+}
+
+void mpsc_queue_drop(struct mpsc_queue *queue) {
+    mpsc_queue_destruct(queue);
     free(queue);
 }
 
@@ -343,13 +350,13 @@ struct mpsc_shared_queue mpsc_shared_queue_new(size_t datasize) {
     struct mpsc_shared_queue shared_queue;
     shared_queue.inner
         = (struct mpsc_shared_queue_inner*)malloc(sizeof(*shared_queue.inner));
-    shared_queue.inner->queue = mpsc_queue_new(datasize);
+    mpsc_queue_construct(&shared_queue.inner->queue, datasize);
     atomic_init(&shared_queue.inner->refcount, 1);
     return shared_queue;
 }
 
 struct mpsc_queue* mpsc_shared_queue_get(struct mpsc_shared_queue shared_queue) {
-    return shared_queue.inner->queue;
+    return &shared_queue.inner->queue;
 }
 
 struct mpsc_shared_queue mpsc_shared_queue_clone(struct mpsc_shared_queue shared_queue) {
@@ -359,8 +366,7 @@ struct mpsc_shared_queue mpsc_shared_queue_clone(struct mpsc_shared_queue shared
 
 void mpsc_shared_queue_drop(struct mpsc_shared_queue shared_queue) {
     if (atomic_fetch_sub(&shared_queue.inner->refcount, 1) == 1) {
-        mpsc_queue_drop(shared_queue.inner->queue);
-        shared_queue.inner->queue = NULL;
+        mpsc_queue_destruct(&shared_queue.inner->queue);
         free(shared_queue.inner);
     }
 }
