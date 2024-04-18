@@ -67,10 +67,8 @@ struct mpsc_receiver {
         "channel/target type mismatch" \
     ))
 
-/// `T*`.
 #define SENDER(T) T*
 
-/// `T*`.
 #define RECEIVER(T) T*
 
 /// Creates a new channel, first argument is the sender, second is the receiver.
@@ -150,9 +148,6 @@ struct mpsc_receiver {
 #define MPSC_DROP_RECEIVER(_rident) \
     (mpsc_receiver_drop((struct mpsc_receiver*)_rident), _rident = NULL)
 
-// Note: the NOLINTNEXTLINE is required for clang-tidy if _data is a pointer
-//       since it gets suspicous at sizeof of a pointer.
-
 /// Sends data over the channel.  The data parameter is the identifier of a
 /// value, not a pointer to it, and not a literal.  Returns mpsc_CLOSED if
 /// the other half of the channel is disconnected.
@@ -169,7 +164,6 @@ struct mpsc_receiver {
 /// ```
 #define MPSC_SEND(_sident, _data) \
     (MPSC__TYPECHECK(_sident, &_data), \
-    /* NOLINTNEXTLINE */\
     mpsc_sender_send((struct mpsc_sender*)_sident, (void*)&_data))
 
 /// Receives data over the channel.  The data parameter is the identifier of a
@@ -188,21 +182,18 @@ struct mpsc_receiver {
 /// ```
 #define MPSC_RECV(_rident, _data) \
     (MPSC__TYPECHECK(_rident, &_data), \
-    /* NOLINTNEXTLINE */\
     mpsc_receiver_recv((struct mpsc_receiver*)_rident, (void*)&_data))
 
 /// Tries to receive data over the channel if there is any, returns mpsc_EMPTY
 /// otherwise.  See MPSC_RECV for more information.
 #define MPSC_TRY_RECV(_rident, _data) \
     (MPSC__TYPECHECK(_rident, &_data), \
-    /* NOLINTNEXTLINE */\
     mpsc_receiver_try_recv((struct mpsc_receiver*)_rident, (void*)&_data))
 
 /// Receives data over the channel with a timeout, returns mpsc_TIMEOUT if the
 /// timeout is reached.  See MPSC_RECV for more information.
 #define MPSC_RECV_TIMEOUT(_rident, _data, _timeout) \
     (MPSC__TYPECHECK(_rident, &_data), \
-    /* NOLINTNEXTLINE */\
     mpsc_receiver_recv_timeout((struct mpsc_receiver*)_rident, (void*)&_data, _timeout))
 
 /// Returns a string representation of the error.
